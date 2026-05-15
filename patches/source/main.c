@@ -64,6 +64,7 @@ __attribute_reloc__ void (*__OSStopAudioSystem)();
 // for setup
 __attribute_reloc__ void (*orig_thread_init)();
 __attribute_reloc__ void (*menu_init)(int unk);
+__attribute_reloc__ void (*cube_init)();
 __attribute_reloc__ void (*main)();
 
 __attribute_reloc__ model *bg_outer_model;
@@ -370,13 +371,6 @@ __attribute_used__ void pre_menu_init(int unk) {
     mod_cube_colors();
     mod_cube_text();
     mod_cube_anim();
-
-    // delay before boot animation (to wait for GCVideo)
-    const int fps = rmode->viTVMode >> 2 == VI_NTSC ? 60 : 50;
-    const int total_frames = preboot_delay_ms / fps;
-    for (int i = 0; i < total_frames; i++) {
-        VIWaitForRetrace();
-    }
 }
 
 __attribute_used__ void pre_main() {
@@ -428,6 +422,29 @@ __attribute_used__ void pre_main() {
 
 __attribute_used__ u32 get_tvmode() {
     return rmode->viTVMode;
+}
+
+__attribute_used__ void pre_cube_init() {
+    cube_init();
+
+    // Extend the cube animation's initial hold phase so GCVideo / TV has
+    // time to handshake against the VI signal before the cube becomes visible.
+    // Also shift audio cues forward by the same amount so sound stays in sync.
+    if (preboot_delay_ms) {
+        u32 fps = (rmode->viTVMode >> 2 == VI_NTSC) ? 60 : 50;
+        u32 extra = (preboot_delay_ms * fps + 500) / 1000;
+
+        u32 total = (u32)cube_state->fall_delay_frames + extra;
+        cube_state->fall_delay_frames = (total > 255) ? 255 : (u8)total;
+
+        s32 ext = (s32)extra;
+        s32 a = (s32)cube_state->audio_cue_frames_a + ext;
+        s32 b = (s32)cube_state->audio_cue_frames_b + ext;
+        s32 c = (s32)cube_state->audio_cue_frames_c + ext;
+        cube_state->audio_cue_frames_a = (a > 32767) ? 32767 : (s16)a;
+        cube_state->audio_cue_frames_b = (b > 32767) ? 32767 : (s16)b;
+        cube_state->audio_cue_frames_c = (c > 32767) ? 32767 : (s16)c;
+    }
 }
 
 __attribute_data__ int frame_count = 0;
