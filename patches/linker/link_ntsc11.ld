@@ -9,6 +9,7 @@ ntsc11_VIWaitForRetrace = 0x8136600c;
 
 ntsc11_main = 0x813004e4;
 ntsc11_menu_init = 0x8130bc90;
+ntsc11_cube_init = 0x813107b0;
 ntsc11_OSReport = 0x8135a344;
 ntsc11_InitializeUART = 0x81360920;
 ntsc11_WriteUARTN = 0x81360970;
