@@ -16,6 +16,8 @@
 #include "flippy_sync.h"
 #include "dvd_threaded.h"
 #include "bnr_offsets.h"
+#include "bnr.h"
+#include "emu/tweaks.h" // bnr_cache_put: warm the banner cache from the validation read
 
 #include "dolphin_os.h"
 
@@ -113,6 +115,10 @@ dolphin_game_into_t get_game_info(char *game_path) {
     u32 fast_bnr_offset = get_banner_offset_fast(&header);
     // OSReport("DEBUG: Fast BNR offset: %08x\n", fast_bnr_offset);
     if (fast_bnr_offset != 0) {
+        // Validate with just the 32-byte magic here; gm_load_banner reads the full banner
+        // when it actually needs it. (The fast-path that read the whole 8KB banner into a
+        // static buffer grew the loader by ~8KB and broke launching swiss-gc.dol from a
+        // folder -- the boot would hard-reset to the console IPL.)
         dvd_threaded_read(small_buf, 32, fast_bnr_offset, status->fd); //Read in the banner data
 
         u32 magic = small_buf[0];

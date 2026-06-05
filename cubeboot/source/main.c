@@ -309,12 +309,21 @@ int main(int argc, char **argv) {
     set_patch_value(symshdr, syment, symstringdata, "preboot_delay_ms", settings.preboot_delay_ms);
     set_patch_value(symshdr, syment, symstringdata, "postboot_delay_ms", settings.postboot_delay_ms);
 
+    set_patch_value(symshdr, syment, symstringdata, "menu_grid_type", settings.menu_grid_type);
+
     // // Copy settings string
     // void *cube_logo_ptr = (void*)get_symbol_value(symshdr, syment, symstringdata, "cube_logo_path");
     // if (cube_logo_ptr != NULL && settings.cube_logo != NULL) {
     //     iprintf("Copying cube_logo_path: %p\n", cube_logo_ptr);
     //     strcpy(cube_logo_ptr, settings.cube_logo);
     // }
+
+    // Copy default folder string into the patch
+    void *default_folder_ptr = (void*)get_symbol_value(symshdr, syment, symstringdata, "default_folder");
+    if (default_folder_ptr != NULL && settings.default_folder != NULL) {
+        iprintf("Copying default_folder: %p\n", default_folder_ptr);
+        strcpy(default_folder_ptr, settings.default_folder);
+    }
 
     // Copy other variables
     set_patch_value(symshdr, syment, symstringdata, "is_running_dolphin", is_running_dolphin);

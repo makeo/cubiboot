@@ -30,6 +30,9 @@ char *buttons_names[] = {
 
 void load_settings() {
     memset(&settings, 0, sizeof(settings));
+    // Default the menu layout in code so the banner grid works even without a
+    // config.ini being present/readable; config.ini can still override it below.
+    settings.menu_grid_type = MENU_GRID_SMALL_BANNERS;
     int config_size = get_file_size("/config.ini");
     if (config_size == SD_FAIL) return;
 
@@ -68,6 +71,13 @@ void load_settings() {
     if (cube_logo != NULL) {
         iprintf("Found cube_logo = %s\n", cube_logo);
         settings.cube_logo = (char*)cube_logo;
+    }
+
+    // default folder
+    const char *default_folder = ini_get(conf, "cubeboot", "default_folder");
+    if (default_folder != NULL) {
+        iprintf("Found default_folder = %s\n", default_folder);
+        settings.default_folder = (char*)default_folder;
     }
 
     // default program
@@ -148,6 +158,19 @@ void load_settings() {
             iprintf("Found %s = %s\n", button_config_name, dol_path);
 
             settings.boot_buttons[i] = (char*)dol_path;
+        }
+    }
+
+    // menu grid type
+    settings.menu_grid_type = MENU_GRID_SMALL_BANNERS;
+    const char *menu_grid_type = ini_get(conf, "cubeboot", "menu_grid_type");
+    if (menu_grid_type != NULL) {
+        if (strcmp(menu_grid_type, "square_icons") == 0) {
+            settings.menu_grid_type = MENU_GRID_SQUARE_ICONS;
+        } else if (strcmp(menu_grid_type, "banners") == 0) {
+            settings.menu_grid_type = MENU_GRID_BANNERS;
+        } else if (strcmp(menu_grid_type, "small_banners") == 0) {
+            settings.menu_grid_type = MENU_GRID_SMALL_BANNERS;
         }
     }
 

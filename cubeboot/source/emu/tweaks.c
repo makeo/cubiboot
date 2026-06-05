@@ -115,6 +115,11 @@ void bnr_cache_load(BNR* bnr, u32 aram_offset) {
 
 typedef struct {
     u8 game_id[6];
+    // Multi-disc games share the same game_id (game code + maker code); only the disc
+    // number (header 0x06) and version differ. Key on the full disc identity so disc 2+
+    // gets its own banner/description instead of aliasing disc 1's cached entry.
+    u8 disc_num;
+    u8 disc_ver;
     u32 aram_offset;
     bool valid;
 } bnr_cache_entry_t;
@@ -122,20 +127,27 @@ typedef struct {
 static bnr_cache_entry_t bnr_cache[BNR_CACHE_SIZE] = {0};
 static u32 bnr_cache_next_index = 0;
 
-bool bnr_cache_get(u8 game_id[6], BNR* bnr) {
+static inline bool bnr_cache_entry_matches(const bnr_cache_entry_t* e, u8 game_id[6], u8 disc_num, u8 disc_ver) {
+    return e->valid
+        && memcmp(e->game_id, game_id, 6) == 0
+        && e->disc_num == disc_num
+        && e->disc_ver == disc_ver;
+}
+
+bool bnr_cache_get(u8 game_id[6], u8 disc_num, u8 disc_ver, BNR* bnr) {
     for (int i = 0; i < BNR_CACHE_SIZE; i++) {
-        if (bnr_cache[i].valid && memcmp(bnr_cache[i].game_id, game_id, 6) == 0) {
+        if (bnr_cache_entry_matches(&bnr_cache[i], game_id, disc_num, disc_ver)) {
             bnr_cache_load(bnr, bnr_cache[i].aram_offset);
             return true;
         }
     }
-    
+
     return false;
 }
 
-void bnr_cache_put(u8 game_id[6], BNR* bnr) {
+void bnr_cache_put(u8 game_id[6], u8 disc_num, u8 disc_ver, BNR* bnr) {
     for (int i = 0; i < BNR_CACHE_SIZE; i++) {
-        if (bnr_cache[i].valid && memcmp(bnr_cache[i].game_id, game_id, 6) == 0) {
+        if (bnr_cache_entry_matches(&bnr_cache[i], game_id, disc_num, disc_ver)) {
             return;
         }
     }
@@ -143,6 +155,8 @@ void bnr_cache_put(u8 game_id[6], BNR* bnr) {
     bnr_cache_entry_t* entry = &bnr_cache[bnr_cache_next_index];
     entry->valid = false;
     memcpy(entry->game_id, game_id, 6);
+    entry->disc_num = disc_num;
+    entry->disc_ver = disc_ver;
     entry->aram_offset = (16 * 1024 * 1024) - (sizeof(BNR) * (bnr_cache_next_index + 1));
     bnr_cache_store(bnr, entry->aram_offset);
     entry->valid = true;
