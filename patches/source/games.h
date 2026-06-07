@@ -107,6 +107,14 @@ extern char game_enum_path[];
 extern gm_file_entry_t boot_entry;
 extern gm_file_entry_t second_boot_entry;
 
+// last-played: remember_last_game is patched in by the loader (cubeboot/main.c) from
+// config.ini; gm_pending_last_played_slot is the entry index the enum thread wants the
+// menu thread to select once enumeration finishes (-1 = nothing pending).
+extern u32 remember_last_game;
+extern int gm_pending_last_played_slot;
+void gm_apply_pending_last_played();              // menu thread: jump to pending slot
+char *gm_last_played_folder(void);                // startup: folder containing last game, or NULL
+
 void gm_init_heap();
 void gm_init_thread();
 void gm_deinit_thread();

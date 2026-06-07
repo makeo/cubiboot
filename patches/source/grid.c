@@ -99,6 +99,41 @@ void grid_setup_func() {
     return;
 }
 
+// Snap the cursor/scroll to `slot` (used by the last-played feature). Mirrors the
+// line positioning in grid_setup_func but anchored at the target's line instead of
+// START_LINE, and cancels any in-flight scroll anims so there is no leftover motion.
+// Banner loading for the new window (the >ASSET_BUFFER_COUNT sliding-window case) is
+// handled separately by gm_load_window on the menu thread.
+void grid_jump_to_slot(int slot) {
+    if (slot < 0) return;
+
+    int start = slot / columns_per_line;
+    // Don't scroll past the last full window, so the bottom rows stay populated.
+    int max_start = number_of_lines - DRAW_TOTAL_ROWS;
+    if (max_start < 0) max_start = 0;
+    if (start > max_start) start = max_start;
+    if (start < 0) start = 0;
+
+    top_line_num = start;
+    selected_slot = slot;
+
+    for (int line_num = 0; line_num < number_of_lines; line_num++) {
+        line_backing_t *line_backing = &browser_lines[line_num];
+        anim_list_t *anims = &line_backing->anims;
+        anims->pending_count = 0;
+        anims->remaining = 0;
+        line_backing->moving_in = false;
+        line_backing->moving_out = false;
+
+        f32 raw_pos_y = (line_num * offset_y);
+        line_backing->raw_position_y = DRAW_BOUND_TOP - (offset_y * start) + raw_pos_y;
+        line_backing->transparency = 1.0;
+        if (line_num < start || line_num >= start + DRAW_TOTAL_ROWS) {
+            line_backing->transparency = 0.0;
+        }
+    }
+}
+
 void grid_add_anim(int line_num, int direction, f32 distance) {
     line_backing_t *line_backing = &browser_lines[line_num];
     anim_list_t *anims = &line_backing->anims;

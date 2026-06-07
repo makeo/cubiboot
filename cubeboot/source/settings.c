@@ -141,6 +141,15 @@ void load_settings() {
         settings.disable_mcp_select = disable_mcp_select;
     }
 
+    // remember last played game
+    int remember_last_game = 0;
+    if (!ini_sget(conf, "cubeboot", "remember_last_game", "%d", &remember_last_game)) {
+        settings.remember_last_game = 0;
+    } else {
+        iprintf("Found remember_last_game = %d\n", remember_last_game);
+        settings.remember_last_game = remember_last_game;
+    }
+
     // button presses
     for (int i = 0; i < (sizeof(buttons_names) / sizeof(char *)); i++) {
         char *button_name = buttons_names[i];

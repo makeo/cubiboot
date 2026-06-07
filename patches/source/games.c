@@ -38,6 +38,14 @@
 #define PRELOAD_LINE_COUNT 2
 #define ASSET_BUFFER_COUNT 128
 
+// Swiss maintains a recent-games list at this path (when its "Recent List" option is
+// enabled). cubeboot boots games by chainloading swiss-gc.dol with Autoload=, so every
+// launch from the menu lands here -- Recent_0 is the most recent. We only READ it (no
+// sidecar to write), so there is no SD-write dependency. Entries look like
+// "Recent_0=sdc:/Games/Game.iso"; the "<dev>:" prefix is stripped to match our paths.
+#define SWISS_RECENT_PATH "/swiss/settings/recent.ini"
+#define RECENT_READ_SIZE 512   // Recent_0 is line 2, always well within the first sector
+
 // Globals
 int number_of_lines = 4;
 int game_backing_count = 0;
@@ -64,6 +72,18 @@ static u32 gm_entry_count = 0;
 // banners load/free as lines scroll, re-read straight from disc (bypassing the ARAM
 // bnr_cache). Reset per folder scan in gm_check_files.
 static bool gm_evict_on_scroll = false;
+
+// Last-played: remember_last_game is defined/patched in main.c. This is the index the
+// enum thread asks the menu thread to select (-1 = nothing pending).
+int gm_pending_last_played_slot = -1;
+
+// When the cold-boot scan lands in the folder that holds the last-played game, we run that
+// scan in sliding-window mode (no resident banner preload) so the menu appears immediately;
+// the menu thread then jumps to the game and loads just its window, instead of waiting for
+// every banner in the folder to load. gm_last_played_path is the game's full path, read once
+// at the start of that scan and reused by gm_match_last_played (no second recent.ini read).
+static bool gm_scan_is_last_played = false;
+static char gm_last_played_path[MAX_FILE_NAME];
 
 gm_file_entry_t *gm_get_game_entry(int index) {
     if (index >= gm_entry_count) return NULL;
@@ -751,9 +771,12 @@ void gm_check_files(int path_count) {
             if (!gm_evict_on_scroll && gm_count_banner_buf() >= ASSET_BUFFER_COUNT) {
                 gm_evict_on_scroll = true;
             }
+            // Last-played scan: defer ALL banner loading to the background loader
+            // (gm_bg_load_last_played) so the menu can appear and jump to the game first,
+            // instead of blocking here until every banner in the folder is read.
             // Banner is normally already cached by get_game_info (read during validation),
             // so this is a cheap cache hit with no extra file open.
-            if (!gm_evict_on_scroll) {
+            if (!gm_evict_on_scroll && !gm_scan_is_last_played) {
                 bool bnr_loaded = gm_load_banner(backing, aram_offset, force_unload, true);
                 if (!bnr_loaded) {
                     OSReport("Failed to load banner %s\n", entry->path);
@@ -941,6 +964,213 @@ bool gm_can_move() {
     return true;
 }
 
+// ===== Last played =========================================================
+
+// Strip the "<dev>:" device prefix Swiss writes (e.g. "sdc:/Games/x.iso" -> "/Games/x.iso")
+// so the path matches cubeboot's internal entry paths. Returns the value unchanged if there
+// is no prefix.
+static const char *gm_strip_device(const char *value) {
+    const char *colon = strchr(value, ':');
+    return colon != NULL ? colon + 1 : value;
+}
+
+// Read Swiss's recent-games list and return the most-recently-played GAME path into `out`.
+// Swiss writes entries newest-first ("Recent_0=...", "Recent_1=..."), so we walk the lines
+// top-to-bottom and return the first whose extension is a game image -- this skips a
+// last-launched utility (.dol) so it doesn't shadow the real last game. Uses the synchronous
+// DI read so it is safe both pre-thread (startup folder selection) and on the enum thread
+// (matching). Returns false if the option is off, the file is missing/empty, or it holds no
+// game entry (e.g. Swiss's "Recent List" setting is disabled).
+static bool gm_read_last_played(char *out, int out_len) {
+    static GCN_ALIGNED(char) rbuf[RECENT_READ_SIZE];
+    memset(rbuf, 0, sizeof(rbuf));
+
+    if (dvd_custom_open(SWISS_RECENT_PATH, FILE_ENTRY_TYPE_FILE, IPC_FILE_FLAG_DISABLECACHE) != 0) return false;
+    file_status_t *status = dvd_custom_status();
+    if (status == NULL || status->result != 0) return false;
+    int r = dvd_read(rbuf, sizeof(rbuf) - 1, 0, status->fd);
+    dvd_custom_close(status->fd);
+    if (r != 0) return false;
+    rbuf[sizeof(rbuf) - 1] = '\0';
+
+    char *p = rbuf;
+    while (*p != '\0') {
+        // terminate the current line (paths may contain spaces, so only stop at CR/LF)
+        char *eol = p;
+        while (*eol != '\0' && *eol != '\r' && *eol != '\n') eol++;
+        char saved = *eol;
+        *eol = '\0';
+
+        if (strncmp(p, "Recent_", 7) == 0) {
+            char *eq = strchr(p, '=');
+            if (eq != NULL) {
+                const char *path = gm_strip_device(eq + 1);
+                if (path[0] != '\0' && gm_get_file_type(path) == GM_FILE_TYPE_GAME) {
+                    strncpy(out, path, out_len - 1);
+                    out[out_len - 1] = '\0';
+                    return true;
+                }
+            }
+        }
+
+        if (saved == '\0') break;               // last line, no trailing newline
+        p = eol + 1;
+        while (*p == '\r' || *p == '\n') p++;   // skip the line break(s)
+    }
+    return false;
+}
+
+// Cold-boot startup folder: when a last-played game is saved, return the folder that
+// CONTAINS it, so the menu opens wherever that game lives -- including letter/genre
+// subfolders, not just default_folder. Returns NULL (caller falls back to default_folder)
+// when the option is off, nothing is saved, or the folder can't be opened.
+char *gm_last_played_folder(void) {
+    static char folder_buf[MAX_FILE_NAME];
+    if (!remember_last_game) return NULL;
+    if (!gm_read_last_played(folder_buf, sizeof(folder_buf))) return NULL;
+
+    // strip the filename to get the containing folder
+    char *last_slash = strrchr(folder_buf, '/');
+    if (last_slash == NULL) return NULL;        // malformed (no slash)
+    if (last_slash == folder_buf) {
+        folder_buf[1] = '\0';                   // game at root -> "/"
+    } else {
+        *last_slash = '\0';                     // "/a/b/Game.iso" -> "/a/b"
+    }
+
+    // verify the folder still exists; otherwise fall back to the default
+    if (dvd_custom_open(folder_buf, FILE_ENTRY_TYPE_DIR, 0) != 0) return NULL;
+    dvd_custom_close(dvd_custom_status()->fd);
+    return folder_buf;
+}
+
+// Run once, at the very start of the cold-boot scan (before gm_check_files), to decide
+// whether this folder is the one holding the last-played game. If so it arms
+// gm_scan_is_last_played (so gm_check_files skips the resident banner preload and the menu
+// appears immediately) and stashes the game's path for gm_match_last_played. One-shot: only
+// the first cold-boot folder pre-selects; later navigation is unaffected. `folder` is the
+// folder being scanned, with a trailing slash (game_enum_path).
+static void gm_arm_last_played(const char *folder) {
+    static bool consumed = false;
+    gm_scan_is_last_played = false;
+    if (!remember_last_game || consumed) return;
+    consumed = true;
+
+    if (!gm_read_last_played(gm_last_played_path, sizeof(gm_last_played_path))) return;
+
+    // Only arm if we actually landed in the game's folder (pre-thread normally ensures this).
+    // Derive the game's folder (keep the trailing slash) and compare to the scanned folder.
+    char game_folder[MAX_FILE_NAME];
+    strcpy(game_folder, gm_last_played_path);
+    char *slash = strrchr(game_folder, '/');
+    if (slash == NULL) return;
+    slash[1] = '\0';                                // "/Games/x.iso" -> "/Games/"
+    if (strcasecmp(game_folder, folder) == 0) {
+        gm_scan_is_last_played = true;
+    }
+}
+
+// After gm_check_files, if this scan was armed, find the last-played game among the scanned
+// entries and stash its index for the menu thread to select. Runs on the enum thread.
+static void gm_match_last_played() {
+    if (!gm_scan_is_last_played) return;
+
+    for (int i = 0; i < gm_entry_count; i++) {
+        gm_file_entry_t *e = gm_entry_backing[i];
+        if (e == NULL || e->type != GM_FILE_TYPE_GAME) continue;
+        // Case-INSENSITIVE: the folder is opened via FAT (case-insensitive), so Swiss can
+        // record a path whose casing differs from the on-disc directory entry. A
+        // case-sensitive compare would open the right folder yet fail to highlight.
+        if (strcasecmp(e->path, gm_last_played_path) == 0) {
+            gm_pending_last_played_slot = i;
+            return;
+        }
+    }
+
+    // Armed but the game wasn't found (e.g. it failed validation): we ran in sliding-window
+    // mode, so nothing is resident. Fall back to slot 0 so gm_apply still loads the top
+    // window and the menu isn't left with blank banners until the user scrolls.
+    gm_pending_last_played_slot = 0;
+}
+
+// Load every game banner on one line directly (used by the background loader). use_cache
+// keeps the ARAM bnr_cache for the resident path; the >ASSET_BUFFER_COUNT sliding path passes
+// false. gm_load_banner is a no-op for an already-resident banner, so re-calls are cheap.
+// Icons are intentionally left to the menu thread (gm_line_load on scroll), so the only pool
+// the background loader touches is the banner pool -- no contention with the live menu.
+static void gm_bg_load_line(int line_num, bool use_cache) {
+    for (int i = 0; i < columns_per_line; i++) {
+        int index = (line_num * columns_per_line) + i;
+        if (index >= gm_entry_count) break;
+        gm_file_entry_t *entry = gm_entry_backing[index];
+        if (entry->type == GM_FILE_TYPE_GAME) {
+            gm_load_banner(entry, 0, false, use_cache);
+        }
+    }
+}
+
+// Background banner loader for the last-played folder. Runs on the enum thread AFTER the (fast,
+// banner-less) scan. It loads the selected game's on-screen window FIRST so that game's banner
+// appears almost immediately, then fills the rest of the folder while the menu is already
+// interactive (the cursor is already on the game via gm_apply_pending_last_played).
+// game_enum_running stays true throughout so a boot (Start -> gm_deinit_thread) still joins this
+// thread; navigation/boot interrupt it via game_enum_mutex.
+static void gm_bg_load_last_played(int target_slot) {
+    // Count games: only banners use the pool, and only <=ASSET_BUFFER_COUNT fit resident.
+    int game_count = 0;
+    for (int i = 0; i < gm_entry_count; i++) {
+        if (gm_entry_backing[i]->type == GM_FILE_TYPE_GAME) game_count++;
+    }
+    bool resident = (game_count <= ASSET_BUFFER_COUNT);
+    // >pool: must use the sliding window (banners load/free on scroll). <=pool: stay resident
+    // so scrolling never re-reads once filled.
+    gm_evict_on_scroll = !resident;
+
+    if (target_slot < 0) target_slot = 0;
+
+    // Mirror grid_jump_to_slot's top-line clamp so the window we load matches what's shown.
+    int start = target_slot / columns_per_line;
+    int max_start = number_of_lines - DRAW_TOTAL_ROWS;
+    if (max_start < 0) max_start = 0;
+    if (start > max_start) start = max_start;
+    if (start < 0) start = 0;
+
+    int first = start - PRELOAD_LINE_COUNT;
+    if (first < 0) first = 0;
+    int last = start + DRAW_TOTAL_ROWS + PRELOAD_LINE_COUNT;
+    if (last >= number_of_lines) last = number_of_lines - 1;
+
+    // 1) Selected game's window first -> its banner is ready almost immediately.
+    for (int l = first; l <= last; l++) gm_bg_load_line(l, resident);
+
+    // >pool: the rest stream in on scroll (sliding window); nothing more to preload.
+    if (!resident) return;
+
+    // 2) Fill the rest of the folder resident, so later scrolling is instant. Poll the enum
+    // mutex each line so gm_deinit_thread (boot/navigation) can stop us promptly.
+    for (int l = 0; l < number_of_lines; l++) {
+        if (l >= first && l <= last) continue;            // window already loaded
+        if (!OSTryLockMutex(game_enum_mutex)) return;     // stop requested
+        OSUnlockMutex(game_enum_mutex);
+        gm_bg_load_line(l, resident);
+    }
+}
+
+// Menu-thread side of the jump. The pending slot is set only after the grid is fully built
+// (gm_match_last_played), so this fires immediately -- the cursor lands on the last game right
+// away (even while its banner is still loading in the background), so pressing Start boots the
+// right game. Banners are loaded by the background loader on the enum thread; the jump only
+// touches menu-thread state (cursor/scroll), so the two never contend.
+void gm_apply_pending_last_played() {
+    if (gm_pending_last_played_slot < 0) return;
+
+    int slot = gm_pending_last_played_slot;
+    gm_pending_last_played_slot = -1;
+    if (slot >= gm_entry_count) return;
+
+    grid_jump_to_slot(slot);
+}
+
 #if 0
 void gm_debug_func() {
     int icon_buf_count = gm_count_icon_buf();
@@ -999,8 +1229,21 @@ void *gm_thread_worker(void* param) {
     gm_list_info list_info = gm_list_files(target);
     gm_setup_grid(list_info.num_paths, true);
     gm_sort_files(list_info.num_paths);
+
+    // Decide BEFORE loading banners whether this is the last-played folder: if so gm_check_files
+    // skips the resident preload (sliding-window mode) so the menu appears immediately and only
+    // the selected game's window is loaded afterwards.
+    gm_arm_last_played(target);
     gm_check_files(list_info.num_paths);
     gm_setup_grid(gm_entry_count, false);
+
+    // Pre-select the last-played game and, for that scan, load its banner window in the
+    // background: the menu jumps to the game first (cursor + its banner), then the rest of
+    // the folder's banners fill in here while the menu is already interactive.
+    gm_match_last_played();
+    if (gm_scan_is_last_played) {
+        gm_bg_load_last_played(gm_pending_last_played_slot);
+    }
 
     game_enum_running = false;
     // DCBlockStore((void*)OSRoundDown32B((u32)&game_enum_running));

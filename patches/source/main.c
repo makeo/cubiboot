@@ -46,6 +46,7 @@ __attribute_data__ u32 start_passthrough_game = 0;
 __attribute_data__ static u8 *cube_text_tex = NULL;
 __attribute_data__ char cube_logo_path[MAX_FILE_NAME] = {0};
 __attribute_data__ char default_folder[MAX_FILE_NAME] = {0};
+__attribute_data__ u32 remember_last_game = 0;
 __attribute_data__ u32 force_progressive = 0;
 __attribute_data__ u32 force_swiss_boot = 0;
 
@@ -380,7 +381,14 @@ __attribute_used__ void pre_thread_init() {
     gm_init_heap();
     gm_init_thread();
     if (!start_passthrough_game) {
-        gm_start_thread(resolve_default_folder());
+        // Open the folder containing the last-played game (any folder, e.g. letter/genre
+        // subfolders) when remember_last_game is on and one is saved; otherwise fall back
+        // to default_folder.
+        const char *target = gm_last_played_folder();
+        if (target == NULL) {
+            target = resolve_default_folder();
+        }
+        gm_start_thread(target);
     }
 }
 

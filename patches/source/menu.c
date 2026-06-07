@@ -781,6 +781,10 @@ __attribute_used__ s32 handle_gameselect_inputs() {
     update_icon_positions();
     grid_update_icon_positions();
 
+    // Last-played: select the saved game once the enum thread has finished scanning the
+    // folder shown at cold boot. No-op on every later frame (pending slot is cleared).
+    gm_apply_pending_last_played();
+
     // TODO: this code is so annoying haha... I should add a direction var
     // TODO: only works with numbers that do not divide into 255 (switch to floats?)
     u8 transition_step = 14;
@@ -889,6 +893,10 @@ __attribute_used__ s32 handle_gameselect_inputs() {
 
         if (!emu_can_boot(entry->type))
             return MENU_GAMESELECT_TRANSITION_ID;
+
+        // No save step needed: cubeboot boots games via swiss-gc.dol autoload, so Swiss
+        // records this launch in its own recent list, which we read back at the next cold
+        // boot to pre-select (see gm_read_last_played).
 
         memcpy(&boot_entry, entry, sizeof(gm_file_entry_t));
         if (boot_entry.second != NULL) {

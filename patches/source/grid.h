@@ -53,6 +53,7 @@ f32 get_position_after(line_backing_t *line_backing);
 
 void grid_setup_columns_per_line();
 void grid_setup_func();
+void grid_jump_to_slot(int slot);
 int grid_dispatch_navigate_up();
 int grid_dispatch_navigate_down();
 void grid_update_icon_positions();

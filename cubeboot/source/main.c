@@ -304,6 +304,7 @@ int main(int argc, char **argv) {
     set_patch_value(symshdr, syment, symstringdata, "force_swiss_boot", settings.force_swiss_default);
 
     set_patch_value(symshdr, syment, symstringdata, "disable_mcp_select", settings.disable_mcp_select);
+    set_patch_value(symshdr, syment, symstringdata, "remember_last_game", settings.remember_last_game);
     set_patch_value(symshdr, syment, symstringdata, "show_watermark", settings.show_watermark);
 
     set_patch_value(symshdr, syment, symstringdata, "preboot_delay_ms", settings.preboot_delay_ms);
